@@ -7,6 +7,8 @@ set -e
 echo "Initializing git repository..."
 git init
 
+git init
+
 # Check if remote 'origin' already exists
 if git remote | grep -q 'origin'; then
     echo "Remote 'origin' already exists. Setting URL..."
