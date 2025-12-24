@@ -1,0 +1,284 @@
+{
+  "name": "Daily Weather Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "mode": "cron",
+          "value": "0 8 * * *"
+        }
+      },
+      "name": "Daily Cron Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [
+        250,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "cities",
+              "value": "London,Paris,New York,Tokyo"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Config: Cities",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const cities = $json.cities.split(',');\nreturn cities.map(city => ({ json: { city: city.trim() } }));"
+      },
+      "name": "Split Cities into Items",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// @ts-check\n\n/**\n * This script processes weather data for a given city, normalizes it\n * into the required database schema, and checks for alerts.\n *\n * @typedef {Object} InputItem\n * @property {Object} json\n * @property {string} json.city\n */\n\n/**\n * @typedef {Object} WeatherOutput\n * @property {string} city\n * @property {number} temperature\n * @property {string} temperature_unit\n * @property {string} condition\n * @property {number} humidity\n * @property {number} wind_speed\n * @property {string|null} alert_type\n * @property {string} summary\n * @property {any} raw_response\n */\n\nclass WeatherProcessor {\n  /**\n   * @param {string} apiKey\n   */\n  constructor(apiKey) {\n    if (!apiKey) {\n      throw new Error('OpenWeatherMap API key is required.');\n    }\n    this.apiKey = apiKey;\n    this.BASE_URL = 'https://api.openweathermap.org/data/2.5/weather';\n  }\n\n  /**\n   * Fetches weather data for a single city.\n   * @param {string} city\n   * @returns {Promise<any>}\n   */\n  async fetchWeather(city) {\n    const url = `${this.BASE_URL}?q=${city}&appid=${this.apiKey}&units=metric`;\n    console.log(`Fetching weather for ${city}`);\n    const response = await fetch(url);\n    if (!response.ok) {\n      const errorText = await response.text();\n      console.error(`API request failed for ${city}: ${errorText}`);\n      throw new Error(`Failed to fetch weather for ${city}. Status: ${response.status}`);\n    }\n    return response.json();\n  }\n\n  /**\n   * Normalizes raw API data into the target structured format.\n   * @param {any} rawData\n   * @returns {WeatherOutput}\n   */\n  normalizeData(rawData) {\n    const celsius = rawData.main.temp;\n    const fahrenheit = (celsius * 9) / 5 + 32;\n\n    const normalized = {\n      city: rawData.name,\n      temperature: parseFloat(celsius.toFixed(2)),\n      temperature_unit: 'C',\n      condition: rawData.weather[0]?.main || 'N/A',\n      humidity: rawData.main.humidity,\n      wind_speed: parseFloat((rawData.wind.speed * 3.6).toFixed(2)), // m/s to kph\n      alert_type: null,\n      summary: '', // Will be generated next\n      raw_response: rawData, // Include the raw JSON response\n    };\n\n    normalized.alert_type = this.generateAlert(normalized);\n    normalized.summary = this.generateSummary({ ...normalized, temp_f: fahrenheit });\n\n    console.log(`Normalized data for ${normalized.city}:`, normalized);\n    return normalized;\n  }\n\n  /**\n   * Generates a human-readable summary.\n   * @param {Omit<WeatherOutput, 'summary'|'raw_response'> & {temp_f: number}}\n   * @returns {string}\n   */\n  generateSummary(data) {\n    return `Daily Weather - ${data.city}: Temp: ${data.temperature}°C / ${data.temp_f.toFixed(2)}°F, Condition: ${data.condition}, Humidity: ${data.humidity}%, Wind: ${data.wind_speed} kph.`;\n  }\n\n  /**\n   * Checks for weather alerts. Note the case-insensitive matching for condition.\n   * @param {Omit<WeatherOutput, 'alert_type'|'summary'|'raw_response'>}\n   * @returns {string|null}\n   */\n  generateAlert(data) {\n    const condition = data.condition.toLowerCase();\n    // Rule: Rain/Snow/Drizzle/Storm = Precipitation Alert\n    if (['rain', 'snow', 'drizzle', 'storm', 'thunderstorm', 'mist'].includes(condition)) {\n      return 'Precipitation Alert';\n    }\n    // Rule: Temp > 32°C = Heat Alert\n    if (data.temperature > 32) {\n      return 'Heat Alert';\n    }\n    // Rule: Temp < 0°C = Frost Alert\n    if (data.temperature < 0) {\n      return 'Frost Alert';\n    }\n    return null;\n  }\n\n  /**\n   * Main processing function for a single item.\n   * @param {InputItem}\n   * @returns {Promise<WeatherOutput>}\n   */\n  async process(item) {\n    if (!item.json.city) {\n      throw new Error('Input item must have a \"city\" property.');\n    }\n    const rawData = await this.fetchWeather(item.json.city);\n    return this.normalizeData(rawData);\n  }\n}\n\n// Main execution block for the n8n Code Node.\ntry {\n  // @ts-ignore\n  const apiKey = $env['OPENWEATHERMAP_API_KEY'];\n  const processor = new WeatherProcessor(apiKey);\n\n  const results = [];\n  // @ts-ignore\n  for (const item of $items) {\n    try {\n      const outputData = await processor.process(item);\n      results.push({ json: outputData });\n    } catch (error) {\n      console.error(`Error processing city \"${item.json.city}\":`, error.message);\n      results.push({ json: { error: error.message, city: item.json.city } });\n    }\n  }\n  // @ts-ignore\n  return results;\n} catch (error) {\n  console.error('A critical error occurred:', error.message);\n  // @ts-ignore\n  return [{ json: { error: error.message } }];\n}"      },
+      "name": "Process Weather Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        850,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.error}}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "name": "If Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "weather_logs",
+        "columns": {
+          "string": [
+            {
+              "name": "run_at",
+              "value": "={{new Date().toISOString()}}"
+            },
+            {
+              "name": "city",
+              "value": "={{$json.city}}"
+            },
+            {
+              "name": "temperature",
+              "value": "={{$json.temperature}}"
+            },
+            {
+              "name": "temperature_unit",
+              "value": "={{$json.temperature_unit}}"
+            },
+            {
+              "name": "condition",
+              "value": "={{$json.condition}}"
+            },
+            {
+              "name": "humidity",
+              "value": "={{$json.humidity}}"
+            },
+            {
+              "name": "wind_speed",
+              "value": "={{$json.wind_speed}}"
+            },
+            {
+              "name": "alert_type",
+              "value": "={{$json.alert_type}}"
+            },
+            {
+              "name": "raw_response",
+              "value": "={{JSON.stringify($json.raw_response)}}"
+            }
+          ]
+        }
+      },
+      "name": "Save to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Postgres (local)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "subject": "={{$json.alert_type ? `Weather Alert: ${$json.alert_type} in ${$json.city}` : `Daily Weather Report: ${$json.city}`}}",
+        "html": "={{$json.summary}}",
+        "from": "n8n@example.com",
+        "to": "user@example.com"
+      },
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        1450,
+        300
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "1",
+          "name": "SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "subject": "=Failed to fetch weather for {{$json.city}}",
+        "html": "=Error: {{$json.error}}",
+        "from": "n8n-error@example.com",
+        "to": "admin@example.com"
+      },
+      "name": "Notify Error",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        500
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "1",
+          "name": "SMTP"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Cron Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config: Cities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Config: Cities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config: Cities": {
+      "main": [
+        [
+          {
+            "node": "Split Cities into Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Cities into Items": {
+      "main": [
+        [
+          {
+            "node": "Process Weather Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Weather Data": {
+      "main": [
+        [
+          {
+            "node": "If Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Success": {
+      "main": [
+        [
+          {
+            "node": "Save to DB",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to DB": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

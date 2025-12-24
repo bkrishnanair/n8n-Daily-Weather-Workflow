@@ -1,0 +1,10 @@
+# Environment variables
+.env
+
+# Docker
+.DS_Store
+
+# data
+/data
+n8n_data/
+postgres_data/
